@@ -105,6 +105,15 @@ def test():
         return f"Telegram failed: {resp.text}", 500
     return "Test message sent to Telegram.", 200
 
+@app.route("/debug-env", methods=["GET"])
+def debug_env():
+    # DO NOT share this output with anyone; it's just for you.
+    bot_token_present = BOT_TOKEN is not None and BOT_TOKEN.strip() != ""
+    token_len = len(BOT_TOKEN) if BOT_TOKEN else 0
+    return (
+        f"BOT_TOKEN present: {bot_token_present}, length: {token_len}<br>"
+        f"CHANNEL_ID: {repr(CHANNEL_ID)}"
+    )
 
 if __name__ == "__main__":
     # For local run; Render will use gunicorn
