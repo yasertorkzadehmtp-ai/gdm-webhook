@@ -37,26 +37,56 @@ def parse_alert_name(alert_name: str):
         return "SHORT", "EXIT"
     return "UNKNOWN", "UNKNOWN"
 
+def format_pair_for_cornix(symbol: str) -> str:
+    """
+    Convert ETHUSDT -> #ETH/USDT for Cornix.
+    Fallback to #SYMBOL/USDT if pattern not clear.
+    """
+    if not symbol:
+        return "#UNKNOWN/USDT"
+    s = symbol.upper()
+    # Strip possible .P or other suffixes if any slipped through
+    if "." in s:
+        s = s.split(".", 1)[0]
+    if s.endswith("USDT"):
+        base = s[:-4]
+        return f"#{base}/USDT"
+    return f"#{s}/USDT"
 
 def build_message(data: dict) -> str:
     ticker = data.get("ticker")
     price = data.get("price", "0")
     alert_name = data.get("alert_name", "")
-    time_str = data.get("time", "")
 
-    symbol = normalize_symbol(ticker)
+    symbol = normalize_symbol(ticker)          # e.g. ETHUSDT
+    pair   = format_pair_for_cornix(symbol)    # e.g. #ETH/USDT
     side, sig_type = parse_alert_name(alert_name)
 
+    # ENTRY signals (open trade)
+    if sig_type == "ENTRY" and side in ("LONG", "SHORT"):
+        cornix_side = "Long" if side == "LONG" else "Short"
+        msg = (
+            f"⚡⚡ {pair} ⚡⚡\n"
+            f"Signal Type: {cornix_side}\n\n"
+            "Entry Zone:\n"
+            f"{price} - {price}\n"
+        )
+        return msg
+
+    # EXIT signals (close trade)
+    if sig_type == "EXIT":
+        msg = (
+            f"⚡⚡ {pair} ⚡⚡\n"
+            "Signal Type: Close\n"
+        )
+        return msg
+
+    # Fallback (if something weird happens)
     msg = (
-        "GDM 5.5.5 SIGNAL\n"
-        f"SYMBOL: {symbol}\n"
-        f"SIDE: {side}\n"
-        f"TYPE: {sig_type}\n"
-        f"PRICE: {price}\n"
-        f"TIME: {time_str}\n"
-        "LEV: 18x\n"
-        "SIZE: 2%\n"
-        "MODE: ISOLATED ONE-WAY\n"
+        f"⚡⚡ {pair} ⚡⚡\n"
+        "Signal Type: Unknown\n\n"
+        "Entry Zone:\n"
+        f"{price} - {price}\n"
     )
     return msg
 
