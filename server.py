@@ -22,79 +22,54 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessag
 # ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
-def build_cornix_style_message(raw_text: str) -> str:
+def extract_tv_message(req) -> str:
     """
-    raw_text is what comes from TradingView via alert():
+    Extract the actual text TradingView sent.
 
-        BTC/USDT LONG
-        Entry: 3025.5
-
-        Exchange: Bybit
+    Supports:
+    - Raw text body (default TradingView webhook)
+    - JSON with 'message' or 'text'
+    - Form-encoded 'message'
     """
-    text = raw_text.strip()
-    if not text:
-        return "Empty alert received."
+    # 1) Raw body
+    raw_body = req.get_data(as_text=True) or ""
 
-    lines = [l for l in text.splitlines() if l.strip() != ""]
-    if not lines:
-        return "Empty alert received."
+    # 2) JSON payload (if any)
+    if req.is_json:
+        try:
+            data = req.get_json(silent=True) or {}
+        except Exception:
+            data = {}
+        msg_from_json = None
+        if isinstance(data, dict):
+            msg_from_json = data.get("message") or data.get("text")
+        if msg_from_json:
+            return str(msg_from_json).strip()
 
-    # Header: PAIR + SIDE
-    header = lines[0].strip()           # e.g. "BTC/USDT LONG"
-    parts  = header.split()
-    pair   = parts[0] if parts else "UNKNOWN"
-    side   = parts[1].upper() if len(parts) > 1 else "UNKNOWN"
+    # 3) Form field (if somebody used 'message=')
+    form_msg = req.form.get("message")
+    if form_msg:
+        return form_msg.strip()
 
-    # Map side -> emoji + word
-    emoji = "🔻"
-    word  = "CLOSE"
-    if side == "LONG":
-        emoji = "📈"
-        word  = "BUY"
-    elif side == "SHORT":
-        emoji = "📉"
-        word  = "SELL"
-
-    title_line = f"{pair} {emoji} {word}"
-
-    # Find price line
-    price_line = ""
-    verb       = "Price"
-    for l in lines[1:]:
-        ls = l.strip()
-        low = ls.lower()
-        if low.startswith("entry:"):
-            price_line = ls.split(":", 1)[1].strip()
-            verb = "Enter"
-            break
-        if low.startswith("exit:"):
-            price_line = ls.split(":", 1)[1].strip()
-            verb = "Close at"
-            break
-
-    body_line = f"{verb} {price_line}" if price_line else ""
-
-    # Exchange line
-    exchange_line = "📍Bybit"
-
-    result_lines = [title_line]
-    if body_line:
-        result_lines.append(body_line)
-    result_lines.append("")
-    result_lines.append(exchange_line)
-
-    return "\n".join(result_lines)
+    return raw_body.strip()
 
 
 def send_telegram_message(text: str) -> dict:
+    """
+    Send text to Telegram as-is (no rewriting).
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
         return {"ok": False, "error": "Missing Telegram credentials"}
 
+    if not text:
+        text = "(empty alert received)"
+
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
+        # we don't use HTML/Markdown formatting here to avoid
+        # accidentally breaking Cornix parsing; Cornix wants plain text
         "disable_web_page_preview": True,
     }
 
@@ -102,7 +77,12 @@ def send_telegram_message(text: str) -> dict:
     try:
         data = resp.json()
     except Exception:
-        data = {"ok": False, "error": "Non-JSON response from Telegram", "status": resp.status_code}
+        data = {
+            "ok": False,
+            "error": "Non-JSON response from Telegram",
+            "status": resp.status_code,
+            "body": resp.text[:200],
+        }
 
     if not data.get("ok"):
         logger.error("Telegram failed: %s", data)
@@ -123,20 +103,11 @@ def index():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        raw_body = request.get_data(as_text=True) or ""
-        logger.info("Incoming webhook raw body: %r", raw_body)
+        # Extract exactly what TradingView sent
+        raw_body = extract_tv_message(request)
+        logger.info("Incoming webhook payload: %r", raw_body)
 
-        # If TradingView sends JSON in the future, we can handle it too:
-        if request.is_json:
-            data = request.get_json(silent=True) or {}
-            msg_from_json = data.get("message") or data.get("text")
-            if msg_from_json:
-                raw_body = msg_from_json
-
-        message_to_send = build_cornix_style_message(raw_body)
-        logger.info("Built Telegram message:\n%s", message_to_send)
-
-        tg_response = send_telegram_message(message_to_send)
+        tg_response = send_telegram_message(raw_body)
 
         return jsonify({"status": "ok", "telegram": tg_response}), 200
 
