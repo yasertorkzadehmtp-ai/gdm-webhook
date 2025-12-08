@@ -1,150 +1,159 @@
 import os
-import requests
+import logging
 from flask import Flask, request, jsonify
+import requests
 
+# ---------------------------------------------------------
+# Basic setup
+# ---------------------------------------------------------
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gdm-webhook")
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    logger.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set in env vars!")
+
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 
-def normalize_symbol(ticker: str) -> str:
-    if not ticker:
-        return "UNKNOWN"
-    if ":" in ticker:
-        _, symbol = ticker.split(":", 1)
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+def build_cornix_style_message(raw_text: str) -> str:
+    """
+    raw_text is what comes from TradingView via alert():
+        Example:
+
+        BTC/USDT LONG
+        Entry: 3025.5
+
+        Exchange: Bybit
+
+    We convert it to something like:
+
+        BTC/USDT 📈 BUY
+        Enter 3025.5
+
+        📍Bybit
+    """
+    text = raw_text.strip()
+    if not text:
+        return "Empty alert received."
+
+    lines = [l for l in text.splitlines() if l.strip() != ""]
+    if not lines:
+        return "Empty alert received."
+
+    # Header: PAIR + ACTION
+    header = lines[0].strip()           # e.g. "BTC/USDT LONG"
+    parts  = header.split()
+    pair   = parts[0] if parts else "UNKNOWN"
+    side   = parts[1].upper() if len(parts) > 1 else "UNKNOWN"
+
+    # Default values
+    emoji = "🔻"
+    word  = "CLOSE"
+    if side == "LONG":
+        emoji = "📈"
+        word  = "BUY"
+    elif side == "SHORT":
+        emoji = "📉"
+        word  = "SELL"
+
+    title_line = f"{pair} {emoji} {word}"
+
+    # Find price line ("Entry:" or "Exit:")
+    price_line = ""
+    for l in lines[1:]:
+        ls = l.strip()
+        if ls.lower().startswith("entry:"):
+            price_line = ls.split(":", 1)[1].strip()
+            verb = "Enter"
+            break
+        if ls.lower().startswith("exit:"):
+            price_line = ls.split(":", 1)[1].strip()
+            verb = "Close at"
+            break
+
+    body_line = f"{verb} {price_line}" if price_line else ""
+
+    # Exchange line (optional)
+    exchange_line = "📍Bybit"
+
+    result_lines = [title_line]
+    if body_line:
+        result_lines.append(body_line)
+    result_lines.append("")             # blank line
+    result_lines.append(exchange_line)
+
+    return "\n".join(result_lines)
+
+
+def send_telegram_message(text: str) -> dict:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
+        return {"ok": False, "error": "Missing Telegram credentials"}
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"ok": False, "error": "Non-JSON response from Telegram", "status": resp.status_code}
+
+    if not data.get("ok"):
+        logger.error("Telegram failed: %s", data)
     else:
-        symbol = ticker
-    if "." in symbol:
-        symbol = symbol.split(".", 1)[0]
-    return symbol
+        logger.info("Telegram send OK")
+
+    return data
 
 
-def parse_alert_name(alert_name: str):
-    if not alert_name:
-        return "UNKNOWN", "UNKNOWN"
-    a = alert_name.upper()
-    if "LONG" in a and "ENTRY" in a:
-        return "LONG", "ENTRY"
-    if "SHORT" in a and "ENTRY" in a:
-        return "SHORT", "ENTRY"
-    if "EXIT LONG" in a:
-        return "LONG", "EXIT"
-    if "EXIT SHORT" in a:
-        return "SHORT", "EXIT"
-    return "UNKNOWN", "UNKNOWN"
-
-def format_pair_for_cornix(symbol: str) -> str:
-    """
-    Convert ETHUSDT -> #ETH/USDT for Cornix.
-    Fallback to #SYMBOL/USDT if pattern not clear.
-    """
-    if not symbol:
-        return "#UNKNOWN/USDT"
-    s = symbol.upper()
-    # Strip possible .P or other suffixes if any slipped through
-    if "." in s:
-        s = s.split(".", 1)[0]
-    if s.endswith("USDT"):
-        base = s[:-4]
-        return f"#{base}/USDT"
-    return f"#{s}/USDT"
-
-def build_message(data: dict) -> str:
-    ticker = data.get("ticker")
-    price = data.get("price", "0")
-    alert_name = data.get("alert_name", "")
-
-    symbol = normalize_symbol(ticker)          # e.g. ETHUSDT
-    pair   = format_pair_for_cornix(symbol)    # e.g. #ETH/USDT
-    side, sig_type = parse_alert_name(alert_name)
-
-    # ENTRY signals (open trade)
-    if sig_type == "ENTRY" and side in ("LONG", "SHORT"):
-        cornix_side = "Long" if side == "LONG" else "Short"
-        msg = (
-            f"⚡⚡ {pair} ⚡⚡\n"
-            f"Signal Type: {cornix_side}\n\n"
-            "Entry Zone:\n"
-            f"{price} - {price}\n"
-        )
-        return msg
-
-    # EXIT signals (close trade)
-    if sig_type == "EXIT":
-        msg = (
-            f"⚡⚡ {pair} ⚡⚡\n"
-            "Signal Type: Close\n"
-        )
-        return msg
-
-    # Fallback (if something weird happens)
-    msg = (
-        f"⚡⚡ {pair} ⚡⚡\n"
-        "Signal Type: Unknown\n\n"
-        "Entry Zone:\n"
-        f"{price} - {price}\n"
-    )
-    return msg
+# ---------------------------------------------------------
+# Routes
+# ---------------------------------------------------------
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({"status": "ok", "message": "GDM webhook running"}), 200
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        payload = request.get_json(force=True)
+        raw_body = request.get_data(as_text=True) or ""
+        logger.info("Incoming webhook raw body: %r", raw_body)
+
+        # If TradingView ever sends JSON, we can also handle that:
+        if request.is_json:
+            data = request.get_json(silent=True) or {}
+            msg_from_json = data.get("message") or data.get("text")
+            if msg_from_json:
+                raw_body = msg_from_json
+
+        message_to_send = build_cornix_style_message(raw_body)
+        logger.info("Built Telegram message:\n%s", message_to_send)
+
+        tg_response = send_telegram_message(message_to_send)
+
+        return jsonify({"status": "ok", "telegram": tg_response}), 200
+
     except Exception as e:
-        return jsonify({"status": "error", "detail": str(e)}), 400
-
-    if payload.get("token") != WEBHOOK_SECRET:
-        return jsonify({"status": "forbidden"}), 403
-
-    text = build_message(payload)
-
-    try:
-        resp = requests.post(
-            TELEGRAM_URL,
-            json={"chat_id": CHANNEL_ID, "text": text},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            return jsonify({"status": "telegram_failed", "detail": resp.text}), 500
-    except Exception as e:
-        return jsonify({"status": "telegram_error", "detail": str(e)}), 500
-
-    return jsonify({"status": "ok"}), 200
+        logger.exception("Error handling webhook")
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
-@app.route("/test", methods=["GET"])
-def test():
-    dummy = {
-        "ticker": "BYBIT:SOLUSDT.P",
-        "price": "123.45",
-        "alert_name": "GDM LONG ENTRY",
-        "time": "MANUAL TEST"
-    }
-    text = build_message(dummy)
-
-    resp = requests.post(
-        TELEGRAM_URL,
-        json={"chat_id": CHANNEL_ID, "text": text}
-    )
-    if resp.status_code != 200:
-        return f"Telegram failed: {resp.text}", 500
-    return "Test message sent to Telegram.", 200
-
-@app.route("/debug-env", methods=["GET"])
-def debug_env():
-    # DO NOT share this output with anyone; it's just for you.
-    bot_token_present = BOT_TOKEN is not None and BOT_TOKEN.strip() != ""
-    token_len = len(BOT_TOKEN) if BOT_TOKEN else 0
-    return (
-        f"BOT_TOKEN present: {bot_token_present}, length: {token_len}<br>"
-        f"CHANNEL_ID: {repr(CHANNEL_ID)}"
-    )
-
+# ---------------------------------------------------------
+# Local run (useful for testing)
+//---------------------------------------------------------
 if __name__ == "__main__":
-    # For local run; Render will use gunicorn
-    app.run(host="0.0.0.0", port=10000)
+    # For local development; Render will use gunicorn
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
