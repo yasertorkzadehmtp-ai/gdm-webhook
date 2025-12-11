@@ -34,6 +34,7 @@ CSV_HEADER = [
     "bar_time",
     "engine",
     "engine_version",
+    "trade_id",
     "signal_kind",
     "direction",
     "symbol",
@@ -94,6 +95,7 @@ def append_log_record(log_data: dict) -> None:
                 "bar_time": log_data.get("bar_time"),
                 "engine": log_data.get("engine"),
                 "engine_version": log_data.get("engine_version"),
+                "trade_id": log_data.get("trade_id"),
                 "signal_kind": log_data.get("signal_kind"),
                 "direction": log_data.get("direction"),
                 "symbol": log_data.get("symbol"),
@@ -238,11 +240,10 @@ def webhook():
         raw_body = extract_tv_message(request)
         logger.info("Incoming webhook payload: %r", raw_body)
 
-        # NEW: parse LOG:{...} if present and append to CSV
+        # Try to log LOG:{...} if present, but never break Telegram delivery
         try:
             maybe_log_from_body(raw_body)
         except Exception:
-            # Never break Telegram / Cornix even if logging fails
             logger.exception("Error while trying to log alert payload")
 
         tg_response = send_telegram_message(raw_body)
