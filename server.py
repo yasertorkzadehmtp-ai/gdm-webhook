@@ -3,9 +3,10 @@ import logging
 import json
 import csv
 import calendar
+import glob
 from datetime import datetime, timezone
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import requests
 
 # ---------------------------------------------------------
@@ -249,6 +250,42 @@ def send_telegram_message(text: str) -> dict:
 # ---------------------------------------------------------
 # Routes
 # ---------------------------------------------------------
+@app.route("/logs", methods=["GET"])
+def list_logs():
+    """
+    Return a simple JSON list of CSV filenames in the logs folder.
+    """
+    try:
+        files = sorted(glob.glob(os.path.join(LOG_DIR, "*.csv")))
+        names = [os.path.basename(f) for f in files]
+        return jsonify({"files": names}), 200
+    except Exception as e:
+        logger.exception("Error listing logs")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/download/<filename>", methods=["GET"])
+def download_log(filename):
+    """
+    Download a CSV file from the logs folder.
+    Usage: /download/<filename>
+    """
+    path = os.path.join(LOG_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        return send_file(
+            path,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name=filename,
+        )
+    except Exception as e:
+        logger.exception("Error sending log file")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({"status": "ok", "message": "GDM webhook running"}), 200
