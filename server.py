@@ -153,6 +153,27 @@ def maybe_log_from_body(raw_body: str) -> None:
         logger.exception("Failed to parse LOG JSON")
 
 
+def strip_log_from_body(raw_body: str) -> str:
+    """
+    Remove any line starting with 'LOG:' from the alert text
+    before sending it to Telegram, so human-facing messages
+    stay clean while we still log the JSON.
+    """
+    if not raw_body:
+        return raw_body
+
+    lines = []
+    for line in raw_body.splitlines():
+        if line.strip().startswith("LOG:"):
+            # skip this line
+            continue
+        lines.append(line)
+
+    # Remove trailing blank lines
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    return "\n".join(lines) + ("\n" if lines else "")
 # ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
@@ -246,7 +267,8 @@ def webhook():
         except Exception:
             logger.exception("Error while trying to log alert payload")
 
-        tg_response = send_telegram_message(raw_body)
+        clean_body = strip_log_from_body(raw_body)
+        tg_response = send_telegram_message(clean_body)
 
         return jsonify({"status": "ok", "telegram": tg_response}), 200
 
