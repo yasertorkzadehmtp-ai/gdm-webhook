@@ -61,12 +61,13 @@ CSV_HEADER = [
 
 
 def _get_csv_path(now_utc: datetime) -> str:
-    # group days in pairs (1-2, 3-4, 5-6, ...)
+    """Return log file path for a 2-day bucket."""
     year = now_utc.year
     month = now_utc.month
     day = now_utc.day
 
-    period_start = day if (day % 2 == 1) else day - 1
+    # group days as (1-2, 3-4, 5-6, ...)
+    period_start = day if day % 2 == 1 else day - 1
     last_day = calendar.monthrange(year, month)[1]
     period_end = min(period_start + 1, last_day)
 
@@ -75,19 +76,14 @@ def _get_csv_path(now_utc: datetime) -> str:
 
 
 def append_log_record(log_data: dict) -> None:
-    """
-    Append one row to the rolling CSV log.
-    log_data is the JSON emitted from Pine (LOG:{...}).
-    """
+    """Append one row to the rolling CSV log."""
     now = datetime.now(timezone.utc)
     csv_path = _get_csv_path(now)
-
     file_exists = os.path.exists(csv_path)
 
     try:
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
-
             if not file_exists:
                 writer.writeheader()
 
@@ -127,10 +123,7 @@ def append_log_record(log_data: dict) -> None:
 
 
 def maybe_log_from_body(raw_body: str) -> None:
-    """
-    Look for a line starting with 'LOG:' in the incoming alert text,
-    parse the JSON, and append to CSV.
-    """
+    """Find a line starting with 'LOG:' and append its JSON to CSV."""
     if not raw_body:
         return
 
@@ -155,42 +148,39 @@ def maybe_log_from_body(raw_body: str) -> None:
 
 
 def strip_log_from_body(raw_body: str) -> str:
-    """
-    Remove any line starting with 'LOG:' from the alert text
-    before sending it to Telegram, so human-facing messages
-    stay clean while we still log the JSON.
-    """
+    """Remove any lines starting with 'LOG:' before sending to Telegram."""
     if not raw_body:
         return raw_body
 
     lines = []
     for line in raw_body.splitlines():
         if line.strip().startswith("LOG:"):
-            # skip this line
+            # skip this line entirely
             continue
         lines.append(line)
 
-    # Remove trailing blank lines
+    # Trim trailing blank lines
     while lines and not lines[-1].strip():
         lines.pop()
 
-    return "\n".join(lines) + ("\n" if lines else "")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
 def extract_tv_message(req) -> str:
-    """
-    Extract the actual text TradingView sent.
+    """Extract the actual text TradingView sent.
 
     Supports:
     - Raw text body (default TradingView webhook)
     - JSON with 'message' or 'text'
     - Form-encoded 'message'
     """
-    # 1) Raw body
+    # 1) raw body
     raw_body = req.get_data(as_text=True) or ""
 
-    # 2) JSON payload (if any)
+    # 2) JSON payload
     if req.is_json:
         try:
             data = req.get_json(silent=True) or {}
@@ -202,7 +192,7 @@ def extract_tv_message(req) -> str:
         if msg_from_json:
             return str(msg_from_json).strip()
 
-    # 3) Form field (if somebody used 'message=')
+    # 3) form field
     form_msg = req.form.get("message")
     if form_msg:
         return form_msg.strip()
@@ -211,9 +201,7 @@ def extract_tv_message(req) -> str:
 
 
 def send_telegram_message(text: str) -> dict:
-    """
-    Send text to Telegram as-is (no rewriting).
-    """
+    """Send text to Telegram as-is (no formatting changes)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
         return {"ok": False, "error": "Missing Telegram credentials"}
@@ -224,23 +212,18 @@ def send_telegram_message(text: str) -> dict:
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        # keep plain text so Cornix parsing is safe
         "disable_web_page_preview": True,
     }
 
-    resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
     try:
+        resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
         data = resp.json()
-    except Exception:
-        data = {
-            "ok": False,
-            "error": "Non-JSON response from Telegram",
-            "status": resp.status_code,
-            "body": resp.text[:200],
-        }
+    except Exception as e:
+        logger.exception("Telegram request failed")
+        return {"ok": False, "error": str(e)}
 
     if not data.get("ok"):
-        logger.error("Telegram failed: %s", data)
+        logger.error("Telegram send failed: %s", data)
     else:
         logger.info("Telegram send OK")
 
@@ -252,9 +235,7 @@ def send_telegram_message(text: str) -> dict:
 # ---------------------------------------------------------
 @app.route("/logs", methods=["GET"])
 def list_logs():
-    """
-    Return a simple JSON list of CSV filenames in the logs folder.
-    """
+    """Return a list of CSV filenames in the logs folder."""
     try:
         files = sorted(glob.glob(os.path.join(LOG_DIR, "*.csv")))
         names = [os.path.basename(f) for f in files]
@@ -266,10 +247,7 @@ def list_logs():
 
 @app.route("/download/<filename>", methods=["GET"])
 def download_log(filename):
-    """
-    Download a CSV file from the logs folder.
-    Usage: /download/<filename>
-    """
+    """Download a CSV log file from the logs folder."""
     path = os.path.join(LOG_DIR, filename)
     if not os.path.exists(path):
         return jsonify({"error": "File not found"}), 404
@@ -277,7 +255,7 @@ def download_log(filename):
     try:
         return send_file(
             path,
-            mimetype="text/csv",
+mimetype="text/csv",
             as_attachment=True,
             download_name=filename,
         )
@@ -294,16 +272,17 @@ def index():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        # Extract exactly what TradingView sent
+        # 1) Extract exactly what TradingView sent
         raw_body = extract_tv_message(request)
         logger.info("Incoming webhook payload: %r", raw_body)
 
-        # Try to log LOG:{...} if present, but never break Telegram delivery
+        # 2) Try to log LOG:{...} if present
         try:
             maybe_log_from_body(raw_body)
         except Exception:
             logger.exception("Error while trying to log alert payload")
 
+        # 3) Strip LOG line, send only signal text to Telegram
         clean_body = strip_log_from_body(raw_body)
         tg_response = send_telegram_message(clean_body)
 
