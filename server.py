@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import json
 import csv
@@ -7,6 +8,12 @@ import glob
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, send_file
+
+# HB15_DEDUP_STORE: in-memory de-duplication to avoid repeated TradingView heartbeat spam
+HB15_SEEN = {}  # key -> last_seen_epoch
+HB15_TTL_SEC = 2 * 60 * 60  # keep keys for 2h
+HB15_DUP_WINDOW_SEC = 120   # drop duplicates within 120s
+
 import requests
 
 
@@ -286,6 +293,29 @@ def webhook():
         print("[WEBHOOK] method=", request.method, "path=", request.path)
         print("[WEBHOOK] headers=", dict(request.headers))
         raw = request.get_data(as_text=True)
+
+        # --- HB15 DEDUP (v3-i3) ---
+        try:
+            now = time.time()
+            # prune old keys occasionally
+            if len(HB15_SEEN) > 2000:
+                for k in list(HB15_SEEN.keys()):
+                    if now - HB15_SEEN.get(k, 0) > HB15_TTL_SEC:
+                        HB15_SEEN.pop(k, None)
+
+            if raw and raw.startswith("LOG:"):
+                payload = raw[4:]
+                data = json.loads(payload)
+                if data.get("event") == "HB15" and data.get("hb") == 1:
+                    key = f'{data.get("event")}::{data.get("symbol")}::{data.get("t15_time")}::{data.get("host_tf")}'
+                    last = HB15_SEEN.get(key)
+                    if last is not None and (now - last) < HB15_DUP_WINDOW_SEC:
+                        print("[HB15] duplicate dropped:", key, "age_sec=", now - last)
+                        return ("duplicate", 200)
+                    HB15_SEEN[key] = now
+        except Exception as e:
+            print("[HB15] dedup_error:", e)
+        # --- END HB15 DEDUP ---
         print("[WEBHOOK] body=", raw)
     except Exception as e:
         print("[WEBHOOK] log_error:", e)
@@ -321,3 +351,6 @@ if __name__ == "__main__":
 
 # GUNICORN_ACCESS_LOG_HINT: In Render, set Start Command to:
 # gunicorn server:app --access-logfile - --error-logfile -
+
+
+# SERVER_BUILD_TAG: v3-i3 (HB15 dedup + request logging)
