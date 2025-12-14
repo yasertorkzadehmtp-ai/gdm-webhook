@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_file
 import requests
 
+
+# BUILD TAG: Render v3-i1 (Integrity fix only)
+# Changed in v3-i1:
+# - Fixed indentation in send_file(...) within /download/<filename> to prevent runtime error.
+
 # ---------------------------------------------------------
 # Basic setup
 # ---------------------------------------------------------
@@ -255,7 +260,7 @@ def download_log(filename):
     try:
         return send_file(
             path,
-mimetype="text/csv",
+            mimetype="text/csv",
             as_attachment=True,
             download_name=filename,
         )
