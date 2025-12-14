@@ -18,6 +18,11 @@ import requests
 # Basic setup
 # ---------------------------------------------------------
 app = Flask(__name__)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "ok", 200
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gdm-webhook")
 
@@ -276,6 +281,15 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    # --- REQUEST LOG (v3-i2) ---
+    try:
+        print("[WEBHOOK] method=", request.method, "path=", request.path)
+        print("[WEBHOOK] headers=", dict(request.headers))
+        raw = request.get_data(as_text=True)
+        print("[WEBHOOK] body=", raw)
+    except Exception as e:
+        print("[WEBHOOK] log_error:", e)
+    # --- END REQUEST LOG ---
     try:
         # 1) Extract exactly what TradingView sent
         raw_body = extract_tv_message(request)
@@ -304,3 +318,6 @@ def webhook():
 if __name__ == "__main__":
     # For local development; Render will use gunicorn in production
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+# GUNICORN_ACCESS_LOG_HINT: In Render, set Start Command to:
+# gunicorn server:app --access-logfile - --error-logfile -
