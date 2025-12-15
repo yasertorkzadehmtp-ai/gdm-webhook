@@ -1,5 +1,4 @@
 import os
-import time
 import logging
 import json
 import csv
@@ -8,18 +7,13 @@ import glob
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, send_file
-
-# HB15_DEDUP_STORE: in-memory de-duplication to avoid repeated TradingView heartbeat spam
-HB15_SEEN = {}  # key -> last_seen_epoch
-HB15_TTL_SEC = 2 * 60 * 60  # keep keys for 2h
-HB15_DUP_WINDOW_SEC = 120   # drop duplicates within 120s
-
 import requests
 
 
-# BUILD TAG: Render v3-i1 (Integrity fix only)
-# Changed in v3-i1:
-# - Fixed indentation in send_file(...) within /download/<filename> to prevent runtime error.
+# BUILD TAG: Render v3-i4 (HB15 telegram guard)
+# Changed in v3-i4:
+# - Do NOT send Telegram messages for LOG-only HB15 telemetry (prevents empty Telegram posts)
+# - If payload strips to empty, skip Telegram instead of sending '(empty alert received)'
 
 # ---------------------------------------------------------
 # Basic setup
@@ -186,6 +180,25 @@ def strip_log_from_body(raw_body: str) -> str:
 # ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
+
+
+def extract_log_json(raw_body: str):
+    """Return parsed dict from first LOG:{...} line, or None."""
+    if not raw_body:
+        return None
+
+    for line in raw_body.splitlines():
+        line = line.strip()
+        if line.startswith("LOG:"):
+            log_json_text = line[len("LOG:"):].strip()
+            try:
+                data = json.loads(log_json_text)
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+    return None
+
 def extract_tv_message(req) -> str:
     """Extract the actual text TradingView sent.
 
@@ -224,7 +237,7 @@ def send_telegram_message(text: str) -> dict:
         return {"ok": False, "error": "Missing Telegram credentials"}
 
     if not text:
-        text = "(empty alert received)"
+        return {"ok": True, "skipped": True, "reason": "empty"}
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -293,29 +306,6 @@ def webhook():
         print("[WEBHOOK] method=", request.method, "path=", request.path)
         print("[WEBHOOK] headers=", dict(request.headers))
         raw = request.get_data(as_text=True)
-
-        # --- HB15 DEDUP (v3-i3) ---
-        try:
-            now = time.time()
-            # prune old keys occasionally
-            if len(HB15_SEEN) > 2000:
-                for k in list(HB15_SEEN.keys()):
-                    if now - HB15_SEEN.get(k, 0) > HB15_TTL_SEC:
-                        HB15_SEEN.pop(k, None)
-
-            if raw and raw.startswith("LOG:"):
-                payload = raw[4:]
-                data = json.loads(payload)
-                if data.get("event") == "HB15" and data.get("hb") == 1:
-                    key = f'{data.get("event")}::{data.get("symbol")}::{data.get("t15_time")}::{data.get("host_tf")}'
-                    last = HB15_SEEN.get(key)
-                    if last is not None and (now - last) < HB15_DUP_WINDOW_SEC:
-                        print("[HB15] duplicate dropped:", key, "age_sec=", now - last)
-                        return ("duplicate", 200)
-                    HB15_SEEN[key] = now
-        except Exception as e:
-            print("[HB15] dedup_error:", e)
-        # --- END HB15 DEDUP ---
         print("[WEBHOOK] body=", raw)
     except Exception as e:
         print("[WEBHOOK] log_error:", e)
@@ -333,7 +323,18 @@ def webhook():
 
         # 3) Strip LOG line, send only signal text to Telegram
         clean_body = strip_log_from_body(raw_body)
-        tg_response = send_telegram_message(clean_body)
+
+        # If the alert is LOG-only telemetry (e.g., HB15), do NOT forward empty messages to Telegram.
+        log_obj = extract_log_json(raw_body)
+        if not clean_body:
+            if isinstance(log_obj, dict) and log_obj.get("event") == "HB15":
+                logger.info("Skipping Telegram for HB15 telemetry (LOG-only).")
+                tg_response = {"ok": True, "skipped": True, "reason": "HB15 telemetry"}
+            else:
+                logger.info("Skipping Telegram for empty body.")
+                tg_response = {"ok": True, "skipped": True, "reason": "empty"}
+        else:
+            tg_response = send_telegram_message(clean_body)
 
         return jsonify({"status": "ok", "telegram": tg_response}), 200
 
@@ -351,6 +352,3 @@ if __name__ == "__main__":
 
 # GUNICORN_ACCESS_LOG_HINT: In Render, set Start Command to:
 # gunicorn server:app --access-logfile - --error-logfile -
-
-
-# SERVER_BUILD_TAG: v3-i3 (HB15 dedup + request logging)
