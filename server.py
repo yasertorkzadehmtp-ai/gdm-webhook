@@ -13,7 +13,7 @@ import requests
 from flask import Flask, request, jsonify, send_file
 
 # =========================================================
-# GDM Server Render v3-i5 — Reliability Polish
+# GDM Server Render v3-i6 — Telegram Sanitize + Inline LOG Parse
 # Purpose:
 # - Reduce missed Telegram sends during cold-start / worker warmup
 # - Prevent empty Telegram messages
@@ -112,35 +112,75 @@ def extract_tv_message(req) -> str:
 
 def strip_log_from_body(raw_body: str) -> str:
     """
-    If raw_body contains a LOG: line (telemetry), remove it and return only the human signal text.
-    Convention from engine:
-      <signal text>
-      LOG:{...json...}
-    or
-      LOG:{...json...}
+    Remove telemetry appended via 'LOG:' and return only the human signal text.
+
+    Supported engine conventions:
+      1) Multi-line:
+         <signal text>
+         LOG:{...json...}
+
+      2) Single-line (Cornix style):
+         /open ... LOG:{...json...}
+         /close ... LOG:{...json...}
+
+    Behavior:
+      - If a line starts with LOG:, it is removed.
+      - If a line contains LOG: inline, everything from LOG: onward is removed (signal prefix kept).
     """
     if not raw_body:
         return ""
 
-    lines = [ln.rstrip() for ln in raw_body.splitlines()]
     keep = []
-    for ln in lines:
-        # treat both 'LOG:' and 'LOG:' with spaces as telemetry
-        if ln.strip().startswith("LOG:"):
-            continue
-        keep.append(ln)
+    for ln in raw_body.splitlines():
+        s = ln.rstrip()
 
-    # Return non-empty normalized body
-    clean = "\n".join([ln for ln in keep]).strip()
+        # Case A: LOG line only (telemetry)
+        if s.strip().startswith("LOG:"):
+            continue
+
+        # Case B: Cornix command with inline LOG:
+        if "LOG:" in s:
+            prefix = s.split("LOG:", 1)[0].rstrip()
+            if prefix:
+                keep.append(prefix)
+            # Anything after LOG: is telemetry; ignore remainder and stop consuming further lines
+            break
+
+        keep.append(s)
+
+    clean = "
+".join([ln for ln in keep]).strip()
     return clean
 
 
 def parse_log_json(raw_body: str) -> Optional[Dict[str, Any]]:
     """
-    Extract JSON after 'LOG:' if present. Returns dict or None.
+    Extract JSON after the first occurrence of 'LOG:'.
+
+    Works for:
+      - A dedicated line starting with 'LOG:'
+      - A single-line command containing '... LOG:{json...}'
+    Returns dict or None.
     """
     if not raw_body:
         return None
+
+    for ln in raw_body.splitlines():
+        s = ln.strip()
+        idx = s.find("LOG:")
+        if idx == -1:
+            continue
+
+        payload = s[idx + 4 :].strip()
+        try:
+            obj = json.loads(payload)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            logger.exception("Failed to parse LOG JSON")
+        return None
+
+    return None
 
     # Find first line that starts with LOG:
     for ln in raw_body.splitlines():
